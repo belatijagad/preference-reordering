@@ -30,8 +30,9 @@ push_to_hub: false
 seed: 42
 
 use_peft: true
-lora_r: 32
-lora_alpha: 64
+# Appendix D, Table 5 uses the same LoRA settings for CMCC and CCAT.
+lora_r: 16
+lora_alpha: 32
 lora_dropout: 0.05
 lora_target_modules:
 - q_proj

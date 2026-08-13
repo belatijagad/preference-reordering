@@ -518,13 +518,12 @@ wheels = [
 
 [[package]]
 name = "flash-attn"
-version = "2.8.3.post1"
-source = { registry = "https://pypi.org/simple" }
+version = "2.8.3+cu128torch2.7"
+source = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.8.3%2Bcu128torch2.7-cp310-cp310-linux_x86_64.whl#sha256=2893bb0421f807ce1f0f59204e0ae88b1c7f56965584f234e42884a14933ddbb" }
 dependencies = [
     { name = "einops", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "torch", version = "2.7.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/01/7a/92a46e7cd6bbb4d7b2855a457c3b855df54a97af5656d98fc92e58e61065/flash_attn-2.8.3.post1.tar.gz", hash = "sha256:55d5103ed846da8b56e0797acf4bde07dee4b1c7e8907fcfc6699c203030c348", size = 8451657, upload-time = "2026-06-11T04:35:21.318Z" }
 
 [[package]]
 name = "fqdn"
@@ -1662,7 +1661,7 @@ requires-dist = [
     { name = "datasets", specifier = "==2.19.1" },
     { name = "einops", specifier = "==0.8.0" },
     { name = "evaluate", specifier = "==0.4.0" },
-    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'remote-cuda'", specifier = "==2.8.3.post1" },
+    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'remote-cuda'", specifier = "==2.8.3" },
     { name = "hf-transfer", specifier = ">=0.1.4" },
     { name = "huggingface-hub", specifier = "==0.23.1" },
     { name = "jinja2", specifier = ">=3.0.0" },

@@ -31,7 +31,7 @@ dependencies = [
 [project.optional-dependencies]
 # Install this extra only on the remote Linux CUDA machine.
 remote-cuda = [
-    "flash-attn==2.8.3.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flash-attn==2.8.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [dependency-groups]
@@ -50,12 +50,9 @@ notebooks = [
 
 [tool.uv]
 package = false
-# CUDA extension builds run inside the already-synced project environment so
-# they use the exact runtime PyTorch ABI. scripts/sync_remote.sh performs the
-# required two-stage sync on a fresh machine.
-no-build-isolation-package = ["flash-attn"]
 
 [tool.uv.sources]
+flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.8.3%2Bcu128torch2.7-cp310-cp310-linux_x86_64.whl#sha256=2893bb0421f807ce1f0f59204e0ae88b1c7f56965584f234e42884a14933ddbb" }
 torch = [
     { index = "pytorch-cu128", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
