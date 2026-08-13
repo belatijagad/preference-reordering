@@ -27,12 +27,8 @@ def main() -> None:
         dtype=torch.bfloat16,
         requires_grad=True,
     )
-    key = torch.randn(
-        2, 512, 8, 128, device=device, dtype=torch.bfloat16, requires_grad=True
-    )
-    value = torch.randn(
-        2, 512, 8, 128, device=device, dtype=torch.bfloat16, requires_grad=True
-    )
+    key = torch.randn(2, 512, 8, 128, device=device, dtype=torch.bfloat16, requires_grad=True)
+    value = torch.randn(2, 512, 8, 128, device=device, dtype=torch.bfloat16, requires_grad=True)
     flash_output = flash_attn_func(query, key, value, dropout_p=0.0, causal=True)
     flash_output.float().square().mean().backward()
 
@@ -40,9 +36,7 @@ def main() -> None:
         raise RuntimeError("FlashAttention produced non-finite output.")
     for tensor_name, tensor in (("query", query), ("key", key), ("value", value)):
         if tensor.grad is None or not torch.isfinite(tensor.grad).all():
-            raise RuntimeError(
-                f"FlashAttention produced a missing or non-finite {tensor_name} gradient."
-            )
+            raise RuntimeError(f"FlashAttention produced a missing or non-finite {tensor_name} gradient.")
 
     # Use CPU float32 SDPA as a small independent forward reference. The remote
     # test intentionally exercises head dimension 128, which Mistral 7B uses.

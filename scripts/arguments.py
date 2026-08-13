@@ -1,0 +1,86 @@
+"""Project argument definitions built on Transformers' public parser APIs."""
+
+import os
+import sys
+from dataclasses import dataclass, field
+from typing import Any
+
+import yaml
+from transformers import AutoTokenizer, HfArgumentParser, TrainingArguments
+
+
+@dataclass
+class ModelArguments:
+    model_name_or_path: str = field(metadata={"help": "Base model identifier or path."})
+    base_model_revision: str | None = None
+    model_revision: str = "main"
+    tokenizer_name_or_path: str | None = None
+    torch_dtype: str = "bfloat16"
+    trust_remote_code: bool = False
+    use_flash_attention_2: bool = True
+    use_peft: bool = True
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
+    lora_target_modules: list[str] | None = None
+
+
+@dataclass
+class DataArguments:
+    preprocessing_num_workers: int | None = None
+    truncation_side: str | None = None
+
+
+def parse_yaml_and_cli(dataclass_types: tuple[type[Any], ...], argv: list[str] | None = None):
+    """Parse one YAML config followed by `--field=value` overrides."""
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or not argv[0].endswith((".yaml", ".yml")):
+        return HfArgumentParser(dataclass_types).parse_args_into_dataclasses(args=argv)
+
+    with open(os.path.abspath(argv[0]), encoding="utf-8") as config_file:
+        values = yaml.safe_load(config_file) or {}
+    if not isinstance(values, dict):
+        raise ValueError("The experiment YAML must contain a mapping at its top level.")
+
+    seen_overrides = set()
+    for raw_argument in argv[1:]:
+        if not raw_argument.startswith("--") or "=" not in raw_argument:
+            raise ValueError(f"Expected YAML overrides in `--field=value` form, received: {raw_argument}")
+        name, raw_value = raw_argument[2:].split("=", 1)
+        name = name.replace("-", "_")
+        if name in seen_overrides:
+            raise ValueError(f"Duplicate argument provided: {name}")
+        seen_overrides.add(name)
+        values[name] = yaml.safe_load(raw_value)
+
+    return HfArgumentParser(dataclass_types).parse_dict(values, allow_extra_keys=False)
+
+
+def get_tokenizer(model_args: ModelArguments, data_args: DataArguments):
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_args.tokenizer_name_or_path or model_args.model_name_or_path,
+        revision=model_args.model_revision,
+        trust_remote_code=model_args.trust_remote_code,
+    )
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    if data_args.truncation_side is not None:
+        tokenizer.truncation_side = data_args.truncation_side
+    if tokenizer.model_max_length > 100_000:
+        tokenizer.model_max_length = 2048
+    return tokenizer
+
+
+def is_openai_format(messages: Any) -> bool:
+    return isinstance(messages, list) and all(
+        isinstance(message, dict) and "role" in message and "content" in message for message in messages
+    )
+
+
+@dataclass
+class DPOTrainingArguments(TrainingArguments):
+    beta: float = 0.1
+    max_prompt_length: int | None = None
+    max_length: int | None = None
+    loss_type: str = "sigmoid"

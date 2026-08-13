@@ -13,70 +13,61 @@
 # limitations under the License.
 import random
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
-from tqdm import tqdm
-from datasets import Dataset
-from transformers.pipelines.pt_utils import KeyDataset
+from typing import Any, Optional
 
 import numpy as np
 import torch
-from torch.nn.utils.rnn import pad_sequence
+from datasets import Dataset
+from tqdm import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizerBase, pipeline
+from transformers.pipelines.pt_utils import KeyDataset
+from trl.trainer.utils import DPODataCollatorWithPadding
+
 
 @dataclass
-class DPODataCollatorWithPadding:
+class DITTODataCollator(DPODataCollatorWithPadding):
     r"""
-    DPO DataCollator class that pads the inputs to the maximum length of the batch.
+    DITTO collator that samples online comparisons and pads the resulting batch.
     Args:
         tokenizer (`PreTrainedTokenizerBase`):
             The tokenizer used for encoding the data.
         model (Optional[`PreTrainedModel`]):
             The model that is being trained. If set and has the *prepare_decoder_input_ids_from_labels*, use it to
             prepare the *decoder_input_ids*.
-        padding (`Union[bool, str, `PaddingStrategy`]`, `optional`, defaults to `True`):
-            padding_strategy to pass to the tokenizer.
         max_length (`Optional[int]`, `optional`, defaults to `None`):
             The maximum length of the sequence to be processed.
         max_prompt_length (`Optional[int]`, `optional`, defaults to `None`):
             The maximum length of the prompt to be processed.
         label_pad_token_id (`int`, defaults to -100):
             The label used for masking.
-        padding_value (`int`, defaults to 0):
-            The value used for padding.
-        is_encoder_decoder (`Optional[bool]`, `optional`, defaults to `None`):
-            Whether or not you model has an encoder_decoder architecture.
-        max_target_length (`Optional[int]`, `optional`, defaults to `None`):
-            The maximum length of the target to be processed. Only useful for encoder-decoder architectures.
         truncation_mode: (`str`, defaults to "keep_end"):
             The truncation mode to use when truncating the prompt.
     """
-    tokenizer: PreTrainedTokenizerBase
-    model: Optional[PreTrainedModel] = None
-    padding: Union[bool, str] = True
-    max_length: Optional[int] = None
-    max_prompt_length: Optional[int] = None
-    label_pad_token_id: int = -100
-    padding_value: int = 0
+
+    tokenizer: PreTrainedTokenizerBase | None = None
+    model: PreTrainedModel | None = None
+    max_length: int | None = None
+    max_prompt_length: int | None = None
     truncation_mode: str = "keep_end"
-    is_encoder_decoder: Optional[bool] = False
-    max_target_length: Optional[int] = None
     pipeline: Optional = None
     train_dataset: Optional = None
 
     frac_expert: Optional = 0.7
     frac_replay: Optional = 0.2
-    frac_noisy: Optional = 0.1     
+    frac_noisy: Optional = 0.1
     rescale_batch: Optional = 3
 
     bootstrap_count: int = 10
     generation_max_new_tokens: int = 1024
     generation_temperature: float = 1.0
     generation_batch_size: int = 1
-    cache: Dict[int, Dict[int, List[str]]] = field(default_factory=dict)
+    cache: dict[int, dict[int, list[str]]] = field(default_factory=dict)
 
     last_sampled_step: int = 0
 
     def __post_init__(self):
+        if self.tokenizer is None:
+            raise ValueError("tokenizer is required.")
         fractions = (self.frac_expert, self.frac_replay, self.frac_noisy)
         if any(value is None or value < 0 for value in fractions):
             raise ValueError("Sampling fractions must be non-negative numbers.")
@@ -95,31 +86,29 @@ class DPODataCollatorWithPadding:
         if self.generation_batch_size <= 0:
             raise ValueError("generation_batch_size must be a positive integer.")
 
-    def resample(self, step):        
-        
+    def resample(self, step):
+
         self.last_sampled_step = step
 
         # iterate over the train_dataset and update the cache
         if step not in self.cache:
             self.cache[step] = {}
-        
+
         # create the pipeline to sample generations for each _item_
-        if self.pipeline == None:
-            
+        if self.pipeline is None:
             self.pipeline = pipeline(
-                "text-generation", 
-                model=self.model, 
+                "text-generation",
+                model=self.model,
                 tokenizer=self.tokenizer,
                 device="cuda",
                 batch_size=self.generation_batch_size,
-                pad_token_id=self.tokenizer.pad_token_id
+                pad_token_id=self.tokenizer.pad_token_id,
             )
-                    
+
         # here, we call the model and add everything to cache:
         self.model.eval()
 
-        with torch.inference_mode(): 
-            
+        with torch.inference_mode():
             prompt_text = []
             for feature in self.train_dataset:
                 prompt_text.append(feature["prompt"])
@@ -127,37 +116,31 @@ class DPODataCollatorWithPadding:
             inference_dataset = Dataset.from_dict({"prompt": prompt_text})
 
             max_gen_tokens = self.generation_max_new_tokens
-            
+
             pipe_result = self.pipeline(
-                KeyDataset(inference_dataset, "prompt"), 
-                max_new_tokens=max_gen_tokens, do_sample=True, 
+                KeyDataset(inference_dataset, "prompt"),
+                max_new_tokens=max_gen_tokens,
+                do_sample=True,
                 temperature=self.generation_temperature,
                 num_return_sequences=self.bootstrap_count,
                 return_full_text=False,
-                pad_token_id=self.tokenizer.unk_token_id
+                pad_token_id=self.tokenizer.unk_token_id,
             )
 
             rejected = []
 
             for outs in tqdm(pipe_result, total=len(inference_dataset)):
                 for out in outs:
-                    
-                    gen_tokens = len(
-                        self.tokenizer(
-                            out["generated_text"], 
-                            add_special_tokens=False
-                        )["input_ids"]
-                    )
-
+                    gen_tokens = len(self.tokenizer(out["generated_text"], add_special_tokens=False)["input_ids"])
 
                     if gen_tokens >= max_gen_tokens - 1:
                         # BAD LANGUAGE MODEL!! NO EOS TOKEN FOR YOU!
                         rejected.append(out["generated_text"])
                     else:
                         rejected.append(out["generated_text"] + " " + self.tokenizer.eos_token)
-                        
+
             ix = 0
-            
+
             for feature in self.train_dataset:
                 for _ in range(self.bootstrap_count):
                     example_id = feature["example_id"]
@@ -166,10 +149,9 @@ class DPODataCollatorWithPadding:
 
                     self.cache[step][example_id].append(rejected[ix])
                     ix += 1
-        
+
         self.model.train()
-        
-        
+
     def build_tokenized_answer(self, prompt, answer):
         """
         Llama tokenizer does satisfy `enc(a + b) = enc(a) + enc(b)`.
@@ -220,7 +202,7 @@ class DPODataCollatorWithPadding:
             attention_mask=answer_attention_mask,
         )
 
-    def tokenize_row(self, prompt, chosen, rejected) -> Dict:
+    def tokenize_row(self, prompt, chosen, rejected) -> dict:
         """Tokenize a single row from a DPO specific dataset.
 
         At this stage, we don't convert to PyTorch tensors yet; we just handle the truncation
@@ -265,14 +247,20 @@ class DPODataCollatorWithPadding:
         # Make sure prompts only have one different token at most an
         # and length only differs by 1 at most
         num_diff_tokens = sum(
-            [a != b for a, b in zip(chosen_tokens["prompt_input_ids"], rejected_tokens["prompt_input_ids"])]
+            [
+                a != b
+                for a, b in zip(
+                    chosen_tokens["prompt_input_ids"],
+                    rejected_tokens["prompt_input_ids"],
+                    strict=False,
+                )
+            ]
         )
         num_diff_len = abs(chosen_prompt_len_input_ids - rejected_prompt_len_input_ids)
-        
+
         if num_diff_tokens > 1 or num_diff_len > 1:
             raise ValueError(
-                "Chosen and rejected prompt_input_ids might only differ on the "
-                "last token due to tokenizer merge ops."
+                "Chosen and rejected prompt_input_ids might only differ on the last token due to tokenizer merge ops."
             )
 
         # bos and eos are already added.
@@ -305,9 +293,9 @@ class DPODataCollatorWithPadding:
             k: rejected_tokens[f"prompt_{k}"] + rejected_tokens[k] for k in ["input_ids", "attention_mask"]
         }
         chosen_sequence_tokens["labels"] = chosen_sequence_tokens["input_ids"][:]
-        chosen_sequence_tokens["labels"][: len(chosen_tokens["prompt_input_ids"])] = [
-            self.label_pad_token_id
-        ] * len(chosen_tokens["prompt_input_ids"])
+        chosen_sequence_tokens["labels"][: len(chosen_tokens["prompt_input_ids"])] = [self.label_pad_token_id] * len(
+            chosen_tokens["prompt_input_ids"]
+        )
         rejected_sequence_tokens["labels"] = rejected_sequence_tokens["input_ids"][:]
         rejected_sequence_tokens["labels"][: len(rejected_tokens["prompt_input_ids"])] = [
             self.label_pad_token_id
@@ -325,84 +313,54 @@ class DPODataCollatorWithPadding:
 
         return batch
 
-    def collate(self, batch):
-        # first, pad everything to the same length
-        padded_batch = {}
-        for k in batch[0].keys():
-            if k.endswith("_input_ids") or k.endswith("_attention_mask") or k.endswith("_labels"):
-                # adapted from https://stackoverflow.com/questions/73256206
-                to_pad = [torch.LongTensor(ex[k][::-1]) for ex in batch]
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
 
-                if k.endswith("_input_ids"):
-                    padding_value = self.tokenizer.pad_token_id
-                elif k.endswith("_labels"):
-                    padding_value = self.label_pad_token_id
-                elif k.endswith("_attention_mask"):
-                    padding_value = 0
-                else:
-                    raise ValueError(f"Unexpected key in batch '{k}'")
-
-                padded_batch[k] = pad_sequence(to_pad, batch_first=True, padding_value=padding_value)
-
-                padded_batch[k] = padded_batch[k].flip(dims=[1])
-                
-            else:
-                padded_batch[k] = [ex[k] for ex in batch]
-        
-        return padded_batch
-
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
-                        
         # we find the rejected samples and pair them with the prompt, collate, etc.
         tokenized_batch = []
         curr_batch = []
-            
+
         for feature in features:
             example_id = feature["example_id"]
             prompt = feature["prompt"]
             chosen = feature["chosen"]
             sample_groups = {"replay": []}
-            
+
             for step_a in range(self.last_sampled_step, -1, -1):
                 sample_groups[step_a] = []
 
                 # skip if we never sampled here
-                if step_a not in self.cache: continue 
+                if step_a not in self.cache:
+                    continue
 
                 # inter-batch
                 for step_b in range(step_a - 1, -1, -1):
-
                     # skip if we never sampled here
-                    if step_b not in self.cache: continue   
-                    
+                    if step_b not in self.cache:
+                        continue
+
                     for rejected_a in self.cache[step_a][example_id]:
                         for rejected_b in self.cache[step_b][example_id]:
-                            sample_groups[step_a].append(
-                                (prompt, rejected_a, rejected_b)
-                            )                       
+                            sample_groups[step_a].append((prompt, rejected_a, rejected_b))
 
                 # replay buffer
                 if step_a < self.last_sampled_step:
                     for rejected_past in self.cache[step_a][example_id]:
                         sample_groups["replay"].append((prompt, chosen, rejected_past))
-               
+
                 # adding expert
                 if step_a == self.last_sampled_step:
                     sample_groups["expert"] = []
                     for rejected in self.cache[self.last_sampled_step][example_id]:
-                        sample_groups["expert"].append(
-                            (prompt, chosen, rejected)
-                        )
+                        sample_groups["expert"].append((prompt, chosen, rejected))
 
             curr_batch.append(sample_groups)
-                     
-        
+
         sampled_batch = []
-    
+
         noisy_samples = []
         expert_samples = []
         replay_samples = []
-        
+
         for sample_groups in curr_batch:
             for iteration in sample_groups:
                 if iteration == "expert":
@@ -411,26 +369,24 @@ class DPODataCollatorWithPadding:
                     replay_samples.extend(sample_groups[iteration])
                 else:
                     noisy_samples.extend(sample_groups[iteration])
-        
+
         len_superbatch = len(curr_batch) * self.rescale_batch
-        noisy_subsample = random.sample(
-            noisy_samples, min(len(noisy_samples), round(len_superbatch * self.frac_noisy))
-        )
+        noisy_subsample = random.sample(noisy_samples, min(len(noisy_samples), round(len_superbatch * self.frac_noisy)))
         expert_subsample = random.sample(
             expert_samples, min(len(expert_samples), round(len_superbatch * self.frac_expert))
         )
         replay_subsample = random.sample(
             replay_samples, min(len(replay_samples), round(len_superbatch * self.frac_replay))
         )
-        
-        sampled_batch = (expert_subsample + noisy_subsample + replay_subsample)
+
+        sampled_batch = expert_subsample + noisy_subsample + replay_subsample
         if not sampled_batch:
             raise ValueError("The configured sampling fractions produced an empty DITTO batch.")
-        
+
         for prompt, chosen, rejected in sampled_batch:
             batch_element = self.tokenize_row(prompt, prompt + chosen, prompt + rejected)
             tokenized_batch.append(batch_element)
-        
-        collated = self.collate(tokenized_batch)
-        
+
+        collated = super().__call__(tokenized_batch)
+
         return collated

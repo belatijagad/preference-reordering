@@ -6,12 +6,9 @@ readme = "README.md"
 requires-python = ">=3.10.9,<3.11"
 dependencies = [
     "accelerate==0.30.1",
-    "alignment-handbook",
     "datasets==2.19.1",
-    "deepspeed==0.17.2",
     "einops==0.8.0",
     "evaluate==0.4.0",
-    "flash-attn==2.8.3.post1",
     "hf-transfer>=0.1.4",
     "huggingface-hub==0.23.1",
     "jinja2>=3.0.0",
@@ -20,6 +17,7 @@ dependencies = [
     "packaging>=23.0",
     "peft==0.9.0",
     "protobuf<=3.20.2",
+    "rich>=11.1.0",
     "safetensors>=0.3.3",
     "scipy",
     "sentencepiece>=0.1.99",
@@ -30,14 +28,18 @@ dependencies = [
     "trl==0.8.6",
 ]
 
+[project.optional-dependencies]
+# Install this extra only on the remote Linux CUDA machine.
+remote-cuda = [
+    "flash-attn==2.8.3.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
 [dependency-groups]
 dev = [
-    "black==23.1.0",
-    "flake8>=6.0.0",
     "hf-doc-builder>=0.4.0",
-    "isort>=5.12.0",
     "parameterized>=0.9.0",
     "pytest",
+    "ruff>=0.12.0",
 ]
 notebooks = [
     "jupyterlab",
@@ -48,39 +50,34 @@ notebooks = [
 
 [tool.uv]
 package = false
-environments = [
-    "sys_platform == 'linux' and platform_machine == 'x86_64'",
-]
-# The pinned Alignment Handbook metadata requires DeepSpeed 0.12.2. That
-# version predates the Blackwell-capable PyTorch stack, so use the compatible
-# direct dependency above without changing the pinned handbook source code.
-override-dependencies = ["deepspeed==0.17.2"]
-# Alignment Handbook lists bitsandbytes as an unconditional dependency, but
-# this project deliberately uses unquantized BF16 weights only.
-exclude-dependencies = ["bitsandbytes"]
+# CUDA extension builds run inside the already-synced project environment so
+# they use the exact runtime PyTorch ABI. scripts/sync_remote.sh performs the
+# required two-stage sync on a fresh machine.
+no-build-isolation-package = ["flash-attn"]
 
 [tool.uv.sources]
-alignment-handbook = { git = "https://github.com/huggingface/alignment-handbook.git", rev = "606d2e954fd17999af40e6fb4f712055ca11b2f0" }
-torch = { index = "pytorch-cu128" }
-
-# DeepSpeed builds extensions against PyTorch. Keep its isolated build
-# environment on exactly the same PyTorch version as the runtime environment.
-[tool.uv.extra-build-dependencies]
-deepspeed = [{ requirement = "torch", match-runtime = true }]
-flash-attn = [
-    { requirement = "torch", match-runtime = true },
-    "ninja",
-    "packaging",
-    "psutil",
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
-
-# Build a wheel for the exact PyTorch ABI and include kernels for both the A100
-# (sm_80) and RTX 5090 / RTX PRO 6000 Blackwell (sm_120). CUDA Toolkit 12.8+
-# and nvcc must be available on the Linux machine performing the sync.
-[tool.uv.extra-build-variables]
-flash-attn = { FLASH_ATTENTION_FORCE_BUILD = "TRUE", FLASH_ATTN_CUDA_ARCHS = "80;120", MAX_JOBS = "4" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["scripts"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
