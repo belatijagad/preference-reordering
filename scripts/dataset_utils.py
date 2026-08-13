@@ -13,7 +13,7 @@
 # limitations under the License.
 import random
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -49,33 +49,38 @@ class DITTODataCollator(DPODataCollatorWithPadding):
     max_length: int | None = None
     max_prompt_length: int | None = None
     truncation_mode: str = "keep_end"
-    pipeline: Optional = None
-    train_dataset: Optional = None
+    pipeline: Any | None = None
+    train_dataset: Dataset | None = None
 
-    frac_expert: Optional = 0.7
-    frac_replay: Optional = 0.2
-    frac_noisy: Optional = 0.1
-    rescale_batch: Optional = 3
+    frac_expert: float = 0.7
+    frac_replay: float = 0.2
+    frac_intermodel: float = 0.1
+    rescale_batch: int = 3
 
     bootstrap_count: int = 10
     generation_max_new_tokens: int = 1024
     generation_temperature: float = 1.0
     generation_batch_size: int = 1
     cache: dict[int, dict[int, list[str]]] = field(default_factory=dict)
+    sampling_deficit: dict[str, float] = field(
+        default_factory=lambda: {"expert": 0.0, "replay": 0.0, "intermodel": 0.0},
+        init=False,
+        repr=False,
+    )
 
     last_sampled_step: int = 0
 
     def __post_init__(self):
         if self.tokenizer is None:
             raise ValueError("tokenizer is required.")
-        fractions = (self.frac_expert, self.frac_replay, self.frac_noisy)
-        if any(value is None or value < 0 for value in fractions):
+        fractions = (self.frac_expert, self.frac_replay, self.frac_intermodel)
+        if any(value < 0 for value in fractions):
             raise ValueError("Sampling fractions must be non-negative numbers.")
         if not np.isclose(sum(fractions), 1.0):
-            raise ValueError("frac_expert, frac_replay, and frac_noisy must sum to 1.0.")
+            raise ValueError("frac_expert, frac_replay, and frac_intermodel must sum to 1.0.")
         if self.frac_expert == 0:
             raise ValueError("frac_expert must be greater than zero for the initial DITTO step.")
-        if self.rescale_batch is None or self.rescale_batch <= 0:
+        if self.rescale_batch <= 0:
             raise ValueError("rescale_batch must be a positive integer.")
         if self.bootstrap_count <= 0:
             raise ValueError("bootstrap_count must be a positive integer.")
@@ -85,6 +90,53 @@ class DITTODataCollator(DPODataCollatorWithPadding):
             raise ValueError("generation_temperature must be greater than zero.")
         if self.generation_batch_size <= 0:
             raise ValueError("generation_batch_size must be a positive integer.")
+
+    def sample_comparisons(
+        self,
+        pools: dict[str, list[tuple[str, str, str]]],
+        total: int,
+    ) -> list[tuple[str, str, str]]:
+        """Sample an exact-size batch while preserving fractional quotas over time."""
+
+        weights = {
+            "expert": self.frac_expert,
+            "replay": self.frac_replay,
+            "intermodel": self.frac_intermodel,
+        }
+        available = [name for name, pool in pools.items() if pool and weights[name] > 0]
+        if not available:
+            raise ValueError("No DITTO comparison samples are available for this batch.")
+
+        # Categories that do not exist yet (replay and intermodel at step zero)
+        # should not accumulate quota debt that would distort later batches.
+        for name in self.sampling_deficit:
+            if name not in available:
+                self.sampling_deficit[name] = 0.0
+
+        active_weight = sum(weights[name] for name in available)
+        counts = dict.fromkeys(pools, 0)
+        priority = {name: index for index, name in enumerate(pools)}
+
+        # Weighted fair queuing carries fractional quota between calls. With a
+        # three-item superbatch and 70/20/10 weights, intermodel samples are
+        # therefore selected across batches instead of rounding to zero forever.
+        for _ in range(total):
+            for name in available:
+                self.sampling_deficit[name] += weights[name] / active_weight
+            selected = max(available, key=lambda name: (self.sampling_deficit[name], -priority[name]))
+            counts[selected] += 1
+            self.sampling_deficit[selected] -= 1.0
+
+        sampled = []
+        for name, count in counts.items():
+            if count <= len(pools[name]):
+                sampled.extend(random.sample(pools[name], count))
+            else:
+                # Tiny pilots may request more comparisons than their pool has
+                # unique entries. Preserve batch size by sampling with replacement.
+                sampled.extend(random.choices(pools[name], k=count))
+        random.shuffle(sampled)
+        return sampled
 
     def resample(self, step):
 
@@ -355,9 +407,7 @@ class DITTODataCollator(DPODataCollatorWithPadding):
 
             curr_batch.append(sample_groups)
 
-        sampled_batch = []
-
-        noisy_samples = []
+        intermodel_samples = []
         expert_samples = []
         replay_samples = []
 
@@ -368,20 +418,17 @@ class DITTODataCollator(DPODataCollatorWithPadding):
                 elif iteration == "replay":
                     replay_samples.extend(sample_groups[iteration])
                 else:
-                    noisy_samples.extend(sample_groups[iteration])
+                    intermodel_samples.extend(sample_groups[iteration])
 
         len_superbatch = len(curr_batch) * self.rescale_batch
-        noisy_subsample = random.sample(noisy_samples, min(len(noisy_samples), round(len_superbatch * self.frac_noisy)))
-        expert_subsample = random.sample(
-            expert_samples, min(len(expert_samples), round(len_superbatch * self.frac_expert))
+        sampled_batch = self.sample_comparisons(
+            {
+                "expert": expert_samples,
+                "replay": replay_samples,
+                "intermodel": intermodel_samples,
+            },
+            len_superbatch,
         )
-        replay_subsample = random.sample(
-            replay_samples, min(len(replay_samples), round(len_superbatch * self.frac_replay))
-        )
-
-        sampled_batch = expert_subsample + noisy_subsample + replay_subsample
-        if not sampled_batch:
-            raise ValueError("The configured sampling fractions produced an empty DITTO batch.")
 
         for prompt, chosen, rejected in sampled_batch:
             batch_element = self.tokenize_row(prompt, prompt + chosen, prompt + rejected)

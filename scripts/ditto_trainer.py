@@ -78,7 +78,7 @@ class DITTOTrainer(DPOTrainer):
             max_prompt_length=max_prompt_length,
             label_pad_token_id=trainer_kwargs.get("label_pad_token_id", -100),
             frac_expert=args.frac_expert,
-            frac_noisy=args.frac_noisy,
+            frac_intermodel=args.frac_intermodel,
             frac_replay=args.frac_replay,
             rescale_batch=args.rescale_batch,
         )

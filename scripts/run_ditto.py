@@ -93,7 +93,7 @@ class DittoConfig(DPOTrainingArguments):
     frac_expert: float | None = field(
         default=None,
     )
-    frac_noisy: float | None = field(
+    frac_intermodel: float | None = field(
         default=None,
     )
     frac_replay: float | None = field(

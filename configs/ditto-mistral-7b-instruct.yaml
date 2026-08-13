@@ -66,4 +66,4 @@ beta: 0.05
 
 frac_expert: 0.7
 frac_replay: 0.2
-frac_noisy: 0.1
+frac_intermodel: 0.1
