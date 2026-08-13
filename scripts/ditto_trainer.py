@@ -59,6 +59,10 @@ class DITTOTrainer(DPOTrainer):
         if isinstance(model, str) or model is None:
             raise ValueError("DITTOTrainer requires an already-instantiated model.")
 
+        # Unlike SFT's tokenized dataset, the online collator consumes the raw
+        # prompt, chosen, and example_id columns.
+        args.remove_unused_columns = False
+
         max_length = trainer_kwargs.get("max_length") or 512
         max_prompt_length = trainer_kwargs.get("max_prompt_length") or 128
         collator = DITTODataCollator(

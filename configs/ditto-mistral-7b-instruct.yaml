@@ -59,6 +59,8 @@ generation_max_new_tokens: 1024
 generation_temperature: 1.0
 generation_batch_size: 1
 
+# SFT removes its source text column after tokenization. DITTOTrainer switches
+# this off when it takes over because its online collator needs the raw rows.
 remove_unused_columns: true
 beta: 0.05
 

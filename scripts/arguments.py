@@ -3,6 +3,7 @@
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -29,6 +30,32 @@ class ModelArguments:
 class DataArguments:
     preprocessing_num_workers: int | None = None
     truncation_side: str | None = None
+
+
+def load_env_file(path: str | Path = ".env") -> None:
+    """Load simple KEY=VALUE entries without replacing exported variables."""
+
+    env_path = Path(path)
+    if not env_path.is_file():
+        return
+
+    for line_number, raw_line in enumerate(env_path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line.removeprefix("export ").lstrip()
+        if "=" not in line:
+            raise ValueError(f"Invalid environment entry at {env_path}:{line_number}; expected KEY=VALUE.")
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key.isidentifier():
+            raise ValueError(f"Invalid environment variable name at {env_path}:{line_number}: {key!r}.")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
 
 
 def parse_yaml_and_cli(dataclass_types: tuple[type[Any], ...], argv: list[str] | None = None):

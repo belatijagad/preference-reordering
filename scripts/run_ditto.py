@@ -35,9 +35,11 @@ from scripts.arguments import (
     ModelArguments,
     get_tokenizer,
     is_openai_format,
+    load_env_file,
     parse_yaml_and_cli,
 )
 from scripts.ditto_trainer import DITTOTrainer
+from scripts.verify_flash_attention import main as verify_flash_attention
 
 
 class EarlyStoppingCallback(TrainerCallback):
@@ -175,6 +177,7 @@ def copy_adapter_weights(src_adapter_name, tgt_adapter_name, model):
 
 
 def main():
+    load_env_file()
     model_args, data_args, training_args = parse_yaml_and_cli((ModelArguments, DataArguments, DittoConfig))
     if not model_args.use_peft:
         raise ValueError("DITTO experiments require `use_peft: true` for the SFT and DITTO adapters.")
@@ -193,6 +196,10 @@ def main():
             raise ValueError(f"{parameter_name} must be a positive integer.")
     if training_args.generation_temperature is None or training_args.generation_temperature <= 0:
         raise ValueError("generation_temperature must be greater than zero.")
+
+    # Validate the exact BF16 forward/backward path before loading the dataset
+    # or allocating the training model.
+    verify_flash_attention()
 
     #######
     # Setup
