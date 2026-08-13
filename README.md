@@ -16,19 +16,34 @@ bash scripts/sync_remote.sh
 
 ## Run
 
-Run the default custom benchmark for author `0`:
+Experiment, dataset, author, output, and generation settings are all in
+[`configs/experiment.yaml`](configs/experiment.yaml). It references the separate
+[`configs/ditto-mistral-7b-instruct.yaml`](configs/ditto-mistral-7b-instruct.yaml)
+model and training configuration.
+Dataset filenames and output paths are derived from the benchmark and model. Run
+it with:
 
 ```sh
 bash run.sh
 ```
 
-Select another processed benchmark or author with environment variables:
+To run another experiment, copy that YAML, edit it, and pass its path:
 
 ```sh
-BENCHMARK=ccat50 AUTHOR_KEY=3 bash run.sh
+cp configs/experiment.yaml configs/my-experiment.yaml
+bash run.sh configs/my-experiment.yaml
 ```
 
-Experiment settings live in [`configs/`](configs/). `run.sh` launches training and generation with Mistral 7B Instruct.
+`run.sh` saves the shared configuration and tokenizer once under
+`outputs/<experiment>/<model>/`. Each benchmark author gets separate SFT and
+DITTO adapters, metrics, checkpoints, and resumable JSONL generations under:
+
+```text
+outputs/<experiment>/<model>/<benchmark>/author-NNN/
+```
+
+`.env` is only used for secrets such as `HF_TOKEN`. Rerunning the same command
+reuses completed adapters and resumes any missing JSONL generations.
 
 ## Citation
 

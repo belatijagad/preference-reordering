@@ -12,11 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import atexit
 import logging
 import pickle
 import random
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -37,6 +39,19 @@ from scripts.arguments import (
     is_openai_format,
     load_env_file,
     parse_yaml_and_cli,
+)
+from scripts.artifacts import (
+    SCHEMA_VERSION,
+    ArtifactLayout,
+    ensure_shared_json,
+    ensure_shared_yaml,
+    git_metadata,
+    model_slug,
+    package_versions,
+    read_json,
+    sha256_file,
+    utc_now,
+    write_json,
 )
 from scripts.ditto_trainer import DITTOTrainer
 from scripts.verify_flash_attention import main as verify_flash_attention
@@ -68,6 +83,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DittoConfig(DPOTrainingArguments):
     output_dir: str | None = field(default=None)
+    artifact_root: str = field(default="outputs")
+    dataset_root: str = field(default="benchmarks")
+    experiment_name: str = field(default="pilot-v1")
+    benchmark: str | None = field(default=None)
+    source_config_sha256: str | None = field(default=None)
 
     ditto_max_steps: int | None = field(
         default=30,
@@ -110,7 +130,9 @@ class DittoConfig(DPOTrainingArguments):
     generation_batch_size: int | None = field(default=1)
     train_author_key: int | None = field(default=0)
     train_instances: int | None = field(default=None)
-    train_pkl: str = field(default=None)
+    train_pkl: str | None = field(default=None)
+    validation_pkl: str | None = field(default=None)
+    test_pkl: str | None = field(default=None)
 
     sft_stop_loss: float | None = field(
         default=1.25,
@@ -189,9 +211,174 @@ def copy_adapter_weights(src_adapter_name, tgt_adapter_name, model):
                 )
 
 
+def initialize_artifacts(model_args, data_args, training_args) -> tuple[ArtifactLayout, dict]:
+    """Create shared experiment metadata and an empty author run."""
+
+    required_paths = {"train_pkl": training_args.train_pkl}
+    for name, value in required_paths.items():
+        if not value:
+            raise ValueError(f"{name} must be configured.")
+    if not training_args.benchmark:
+        raise ValueError("benchmark must be configured.")
+    if not training_args.source_config_sha256:
+        raise ValueError("source_config_sha256 must be supplied by the experiment launcher.")
+
+    layout = ArtifactLayout.for_experiment(
+        training_args.artifact_root,
+        training_args.experiment_name,
+        model_args.model_name_or_path,
+        training_args.benchmark,
+        int(training_args.train_author_key),
+    )
+    if training_args.output_dir and Path(training_args.output_dir).resolve() != layout.author_dir:
+        raise ValueError(f"output_dir conflicts with the path derived from the experiment YAML: {layout.author_dir}")
+    expected_model_slug = model_slug(model_args.model_name_or_path)
+    expected_author_dir = f"author-{int(training_args.train_author_key):03d}"
+    if layout.model_dir.parent.name != training_args.experiment_name:
+        raise ValueError(
+            f"Model artifact directory must be nested under experiment {training_args.experiment_name!r}; "
+            f"received {layout.model_dir}."
+        )
+    if layout.model_dir.name != expected_model_slug:
+        raise ValueError(
+            f"Model artifact directory must end in {expected_model_slug!r} for "
+            f"{model_args.model_name_or_path!r}; received {layout.model_dir}."
+        )
+    if layout.benchmark_dir.name != training_args.benchmark:
+        raise ValueError(
+            f"Benchmark artifact directory must end in {training_args.benchmark!r}; received {layout.benchmark_dir}."
+        )
+    if layout.author_dir.name != expected_author_dir:
+        raise ValueError(
+            f"Author artifact directory must end in {expected_author_dir!r}; received {layout.author_dir}."
+        )
+    if layout.author_dir.exists():
+        raise FileExistsError(f"Refusing to overwrite existing author run: {layout.author_dir}")
+
+    run_specific_fields = {
+        "artifact_root",
+        "benchmark",
+        "dataset_root",
+        "experiment_name",
+        "logging_dir",
+        "output_dir",
+        "run_name",
+        "source_config_sha256",
+        "test_pkl",
+        "train_author_key",
+        "train_instances",
+        "train_pkl",
+        "validation_pkl",
+    }
+    training_config = training_args.to_dict()
+    for field_name in run_specific_fields:
+        training_config.pop(field_name, None)
+    shared_config = {
+        "schema_version": SCHEMA_VERSION,
+        "model": asdict(model_args),
+        "data": asdict(data_args),
+        "training": training_config,
+    }
+    ensure_shared_yaml(layout.config_file, shared_config)
+
+    split_paths = {
+        "train": training_args.train_pkl,
+        "validation": training_args.validation_pkl,
+        "test": training_args.test_pkl,
+    }
+    splits = {}
+    for split, source in split_paths.items():
+        if source:
+            source_path = Path(source).resolve()
+            if not source_path.is_file():
+                raise FileNotFoundError(f"Missing {split} dataset: {source_path}")
+            splits[split] = {"path": str(source_path), "sha256": sha256_file(source_path)}
+    dataset_metadata = {
+        "schema_version": SCHEMA_VERSION,
+        "benchmark": training_args.benchmark,
+        "splits": splits,
+    }
+    ensure_shared_json(layout.dataset_file, dataset_metadata, ("benchmark", "splits"))
+
+    experiment_metadata = {
+        "schema_version": SCHEMA_VERSION,
+        "experiment": training_args.experiment_name,
+        "model_id": model_args.model_name_or_path,
+        "model_revision": model_args.base_model_revision or "main",
+        "tokenizer_id": model_args.tokenizer_name_or_path or model_args.model_name_or_path,
+        "tokenizer_revision": model_args.model_revision,
+        "training_seed": training_args.seed,
+        "config_sha256": sha256_file(layout.config_file),
+        "git": git_metadata(),
+        "packages": package_versions(
+            ["accelerate", "datasets", "flash-attn", "peft", "torch", "transformers", "trl"]
+        ),
+        "hardware": {
+            "gpu": torch.cuda.get_device_name(),
+            "compute_capability": ".".join(str(part) for part in torch.cuda.get_device_capability()),
+            "cuda": torch.version.cuda,
+        },
+    }
+    ensure_shared_json(
+        layout.experiment_file,
+        experiment_metadata,
+        ("experiment", "model_id", "model_revision", "training_seed", "config_sha256"),
+    )
+
+    run_id = (
+        f"{training_args.experiment_name}--{layout.model_dir.name}--{training_args.benchmark}"
+        f"--author-{int(training_args.train_author_key):03d}"
+    )
+    run_metadata = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "experiment": training_args.experiment_name,
+        "benchmark": training_args.benchmark,
+        "model_id": model_args.model_name_or_path,
+        "source_config_sha256": training_args.source_config_sha256,
+        "status": "running",
+        "author_key": int(training_args.train_author_key),
+        "started_at": utc_now(),
+        "completed_at": None,
+        "artifacts": {
+            "sft_adapter": "adapters/sft",
+            "ditto_adapter": "adapters/ditto",
+            "sft_metrics": "metrics/sft.json",
+            "ditto_metrics": "metrics/ditto.json",
+            "generations": "generations",
+        },
+    }
+    write_json(layout.run_file, run_metadata)
+    return layout, run_metadata
+
+
+def mark_incomplete_run_failed(layout: ArtifactLayout) -> None:
+    """Mark ordinary Python failures while leaving completed runs unchanged."""
+
+    if not layout.run_file.is_file():
+        return
+    run_metadata = read_json(layout.run_file)
+    if run_metadata.get("status") == "running":
+        run_metadata["status"] = "failed"
+        run_metadata["completed_at"] = utc_now()
+        write_json(layout.run_file, run_metadata)
+
+
 def main():
     load_env_file()
+    if len(sys.argv) < 2 or not sys.argv[1].endswith((".yaml", ".yml")):
+        raise ValueError("run_ditto.py requires a model/training YAML as its first argument.")
     model_args, data_args, training_args = parse_yaml_and_cli((ModelArguments, DataArguments, DittoConfig))
+    if not training_args.benchmark:
+        raise ValueError("benchmark must be configured.")
+    dataset_dir = Path(training_args.dataset_root) / training_args.benchmark / "processed"
+    training_args.train_pkl = training_args.train_pkl or str(dataset_dir / f"{training_args.benchmark}_train.pkl")
+    training_args.validation_pkl = training_args.validation_pkl or str(
+        dataset_dir / f"{training_args.benchmark}_val.pkl"
+    )
+    training_args.test_pkl = training_args.test_pkl or str(dataset_dir / f"{training_args.benchmark}_test.pkl")
+    if training_args.world_size != 1:
+        raise ValueError("Artifact writes currently require a single-process Accelerate configuration.")
     if not model_args.use_peft:
         raise ValueError("DITTO experiments require `use_peft: true` for the SFT and DITTO adapters.")
     positive_integer_parameters = {
@@ -213,6 +400,10 @@ def main():
     # Validate the exact BF16 forward/backward path before loading the dataset
     # or allocating the training model.
     verify_flash_attention()
+    data_args.truncation_side = "left"  # Preserve assistant labels when sequences are truncated.
+    layout, run_metadata = initialize_artifacts(model_args, data_args, training_args)
+    atexit.register(mark_incomplete_run_failed, layout)
+    training_args.output_dir = str(layout.checkpoint_dir("sft"))
 
     #######
     # Setup
@@ -254,6 +445,10 @@ def main():
         if training_args.train_instances:
             spec_dataset = spec_dataset[: int(training_args.train_instances)]
 
+        run_metadata["training_examples"] = len(spec_dataset)
+        run_metadata["training_indices"] = list(range(len(spec_dataset)))
+        write_json(layout.run_file, run_metadata)
+
         for item in spec_dataset:
             prefs["prompt"].append(item["prompt"])
 
@@ -271,8 +466,9 @@ def main():
     #####################################
     # Load tokenizer and process datasets
     #####################################
-    data_args.truncation_side = "left"  # Truncate from left to ensure we don't lose labels in final turn
     tokenizer = get_tokenizer(model_args, data_args)
+    if training_args.should_save and not layout.tokenizer_dir.exists():
+        tokenizer.save_pretrained(layout.tokenizer_dir)
 
     #####################
     # Apply chat template
@@ -361,7 +557,20 @@ def main():
     )
 
     # SFT Train
-    trainer.train()
+    sft_result = trainer.train()
+    sft_metrics = dict(sft_result.metrics)
+    sft_metrics["train_samples"] = len(sft_train_dataset)
+    trainer.log_metrics("sft", sft_metrics)
+    trainer.save_state()
+    trainer.accelerator.wait_for_everyone()
+    unwrapped_model = trainer.accelerator.unwrap_model(trainer.model)
+    unwrapped_model.save_pretrained(
+        layout.adapters_dir,
+        selected_adapters=["sft"],
+        is_main_process=trainer.accelerator.is_main_process,
+    )
+    if trainer.accelerator.is_main_process:
+        write_json(layout.metrics_file("sft"), sft_metrics)
 
     #########################
     # Instantiate DPO trainer
@@ -373,6 +582,7 @@ def main():
     training_args.warmup_ratio = training_args.ditto_warmup_ratio
     training_args.per_device_train_batch_size = training_args.ditto_per_device_train_batch_size
     training_args.gradient_accumulation_steps = training_args.ditto_gradient_accumulation_steps
+    training_args.output_dir = str(layout.checkpoint_dir("ditto"))
 
     model.add_adapter("ditto", lora_config)
     model.set_adapter("ditto")
@@ -402,10 +612,9 @@ def main():
     ###############
 
     train_result = trainer.train()
-    metrics = train_result.metrics
+    metrics = dict(train_result.metrics)
     metrics["train_samples"] = len(raw_datasets["train"])
-    trainer.log_metrics("train", metrics)
-    trainer.save_metrics("train", metrics)
+    trainer.log_metrics("ditto", metrics)
     trainer.save_state()
 
     logger.info("*** Training complete ***")
@@ -414,17 +623,21 @@ def main():
     # Save model and create model card
     ##################################
 
-    model.delete_adapter("sft")
-
-    logger.info("*** Save model ***")
-
-    trainer.save_model(training_args.output_dir)
-    logger.info(f"Model saved to {training_args.output_dir}")
-
+    trainer.accelerator.wait_for_everyone()
+    unwrapped_model = trainer.accelerator.unwrap_model(trainer.model)
+    unwrapped_model.config.use_cache = True
+    unwrapped_model.save_pretrained(
+        layout.adapters_dir,
+        selected_adapters=["ditto"],
+        is_main_process=trainer.accelerator.is_main_process,
+    )
     if trainer.accelerator.is_main_process:
-        # Restore k,v cache for fast inference
-        trainer.model.config.use_cache = True
-        trainer.model.config.save_pretrained(training_args.output_dir)
+        write_json(layout.metrics_file("ditto"), metrics)
+        run_metadata = read_json(layout.run_file)
+        run_metadata["status"] = "complete"
+        run_metadata["completed_at"] = utc_now()
+        write_json(layout.run_file, run_metadata)
+        logger.info(f"Experiment artifacts saved to {layout.author_dir}")
 
     logger.info("*** Training complete! ***")
 

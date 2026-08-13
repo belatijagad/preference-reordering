@@ -1,0 +1,15 @@
+# Experiment selection
+experiment_name: pilot-v1
+model_config: ditto-mistral-7b-instruct.yaml
+benchmark: custom
+train_author_key: 0
+# train_instances: 10
+
+# Storage conventions
+artifact_root: outputs
+dataset_root: benchmarks
+
+# Output generation
+generation_methods: [zero_shot, few_shot, sft, ditto]
+generation_splits: [test]
+generation_num_return_sequences: 3
