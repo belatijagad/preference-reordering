@@ -64,8 +64,6 @@ class EarlyStoppingCallback(TrainerCallback):
 
 logger = logging.getLogger(__name__)
 
-MISTRAL_CHAT_TEMPLATE = "{{ bos_token }}{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'].strip() + '\n\n' %}{% else %}{% set loop_messages = messages %}{% set system_message = '' %}{% endif %}{% for message in loop_messages %}{% if loop.index0 == 0 %}{% set content = system_message + message['content'] %}{% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' '  + content.strip() + ' ' + eos_token }}{% endif %}{% endfor %}"
-
 
 @dataclass
 class DittoConfig(DPOTrainingArguments):
@@ -120,11 +118,10 @@ class DittoConfig(DPOTrainingArguments):
 
 
 def apply_chat_template(example, tokenizer, task: Literal["sft", "generation", "ditto"]):
-
-    tokenizer.chat_template = MISTRAL_CHAT_TEMPLATE
-
     if task in ["sft", "generation"]:
         messages = example["chosen"]
+        if not is_openai_format(messages):
+            raise ValueError(f"Could not format example as dialogue for `{task}`; expected role/content messages.")
 
         example["text"] = tokenizer.apply_chat_template(
             messages,
@@ -145,10 +142,26 @@ def apply_chat_template(example, tokenizer, task: Literal["sft", "generation", "
             prompt_messages = example["chosen"][:-1]
             chosen_messages = example["chosen"][-1:]
 
-        example["text_prompt"] = tokenizer.apply_chat_template(prompt_messages, tokenize=False)
-        example["text_chosen"] = tokenizer.apply_chat_template(chosen_messages, tokenize=False)
-        if example["text_chosen"].startswith(tokenizer.bos_token):
-            example["text_chosen"] = example["text_chosen"][len(tokenizer.bos_token) :]
+        prompt_text = tokenizer.apply_chat_template(
+            prompt_messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        conversation_text = tokenizer.apply_chat_template(
+            prompt_messages + chosen_messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        if not conversation_text.startswith(prompt_text):
+            raise ValueError(
+                "The tokenizer's chat template does not render a full conversation with the generation prompt as a "
+                "prefix. Set a compatible `chat_template` in the experiment configuration."
+            )
+
+        example["text_prompt"] = prompt_text
+        example["text_chosen"] = conversation_text[len(prompt_text) :]
+        if not example["text_chosen"]:
+            raise ValueError("The tokenizer's chat template produced an empty assistant completion.")
 
     return example
 

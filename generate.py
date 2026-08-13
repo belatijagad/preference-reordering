@@ -1,22 +1,26 @@
 import argparse
 import pickle
+from pathlib import Path
 
 import torch
-from peft import PeftModel
+from peft import PeftConfig, PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, set_seed
 
-MISTRAL_CHAT_TEMPLATE = "{{ bos_token }}{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'].strip() + '\n\n' %}{% else %}{% set loop_messages = messages %}{% set system_message = '' %}{% endif %}{% for message in loop_messages %}{% if loop.index0 == 0 %}{% set content = system_message + message['content'] %}{% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' '  + content.strip() + ' ' + eos_token }}{% endif %}{% endfor %}"
+from scripts.arguments import configure_chat_template, load_env_file
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GPT gen script")
+    load_env_file()
+    parser = argparse.ArgumentParser(description="Generate samples from a trained PEFT adapter")
 
     # Add arguments
     parser.add_argument("-b", "--benchmark", type=str, required=True, help="Name of benchmark dataset")
     parser.add_argument("-t", "--train_author_key", type=int, required=True, help="Author key in pkl file")
     parser.add_argument("--seed", type=int, default=42, help="Generation seed")
-    parser.add_argument("--model-id", default="mistralai/Mistral-7B-Instruct-v0.2", help="Base model used for training")
-    parser.add_argument("--adapter-path", help="Path to the trained DITTO adapter")
+    parser.add_argument("--model-id", help="Override the base model recorded in the adapter")
+    parser.add_argument("--tokenizer-id", help="Override the tokenizer saved with the adapter or base model")
+    parser.add_argument("--chat-template-file", help="Optional Jinja chat template for tokenizers without one")
+    parser.add_argument("--adapter-path", required=True, help="Path to the trained adapter")
     parser.add_argument("--test-pkl", help="Path to the benchmark test pickle")
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -32,8 +36,11 @@ def main():
         parser.error("--num-return-sequences must be greater than zero")
     set_seed(args.seed)
 
-    model_id = args.model_id
-    adapter_path = args.adapter_path or f"./outputs/{args.benchmark}-mistral-7b-instruct-ditto/ditto"
+    adapter_path = args.adapter_path
+    adapter_config = PeftConfig.from_pretrained(adapter_path)
+    model_id = args.model_id or adapter_config.base_model_name_or_path
+    if not model_id:
+        parser.error("The adapter does not record a base model; provide --model-id explicitly")
 
     base_model = AutoModelForCausalLM.from_pretrained(
         model_id,
@@ -41,15 +48,24 @@ def main():
         use_flash_attention_2=True,
     ).to("cuda")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    adapter_directory = Path(adapter_path)
+    saved_tokenizer_directory = (
+        adapter_directory if (adapter_directory / "tokenizer_config.json").is_file() else adapter_directory.parent
+    )
+    tokenizer_source = (
+        args.tokenizer_id
+        or (str(saved_tokenizer_directory) if (saved_tokenizer_directory / "tokenizer_config.json").is_file() else None)
+        or model_id
+    )
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
+    chat_template = Path(args.chat_template_file).read_text(encoding="utf-8") if args.chat_template_file else None
+    configure_chat_template(tokenizer, chat_template)
 
     base_model = PeftModel.from_pretrained(base_model, adapter_path)
 
     base_model.eval()
 
     generator = pipeline("text-generation", model=base_model, device="cuda", tokenizer=tokenizer)
-
-    generator.tokenizer.chat_template = MISTRAL_CHAT_TEMPLATE
 
     path = args.test_pkl or f"./benchmarks/{args.benchmark}/processed/{args.benchmark}_test.pkl"
 

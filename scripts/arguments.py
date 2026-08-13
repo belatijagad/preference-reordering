@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from transformers import AutoTokenizer, HfArgumentParser, TrainingArguments
+from transformers import AutoTokenizer, HfArgumentParser, PreTrainedTokenizerBase, TrainingArguments
 
 
 @dataclass
@@ -16,6 +16,7 @@ class ModelArguments:
     base_model_revision: str | None = None
     model_revision: str = "main"
     tokenizer_name_or_path: str | None = None
+    chat_template: str | None = None
     torch_dtype: str = "bfloat16"
     trust_remote_code: bool = False
     use_flash_attention_2: bool = True
@@ -84,12 +85,43 @@ def parse_yaml_and_cli(dataclass_types: tuple[type[Any], ...], argv: list[str] |
     return HfArgumentParser(dataclass_types).parse_dict(values, allow_extra_keys=False)
 
 
+def configure_chat_template(
+    tokenizer: PreTrainedTokenizerBase,
+    chat_template: str | None = None,
+) -> PreTrainedTokenizerBase:
+    """Select a configured template or the tokenizer's native template."""
+
+    resolved_template = chat_template if chat_template is not None else tokenizer.chat_template
+    if isinstance(resolved_template, dict):
+        if "default" in resolved_template:
+            resolved_template = resolved_template["default"]
+        elif len(resolved_template) == 1:
+            resolved_template = next(iter(resolved_template.values()))
+        else:
+            available_templates = ", ".join(sorted(resolved_template))
+            raise ValueError(
+                "The selected tokenizer provides multiple named chat templates but no default. "
+                f"Set `chat_template` explicitly. Available templates: {available_templates}."
+            )
+    if not isinstance(resolved_template, str) or not resolved_template.strip():
+        raise ValueError(
+            "The selected tokenizer does not provide a chat template. Choose an instruction-tuned tokenizer "
+            "with a native template or set `chat_template` in the experiment configuration."
+        )
+
+    # Store the resolved template so saving the tokenizer also preserves the
+    # exact formatting used by this experiment.
+    tokenizer.chat_template = resolved_template
+    return tokenizer
+
+
 def get_tokenizer(model_args: ModelArguments, data_args: DataArguments):
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name_or_path or model_args.model_name_or_path,
         revision=model_args.model_revision,
         trust_remote_code=model_args.trust_remote_code,
     )
+    configure_chat_template(tokenizer, model_args.chat_template)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     if data_args.truncation_side is not None:
