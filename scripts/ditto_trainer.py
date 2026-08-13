@@ -62,13 +62,11 @@ if is_deepspeed_available():
 
 class ResampleCallback(TrainerCallback):
     "A callback that prints a message at the beginning of training"
-    def __init__(self, collator, model, mode, resample_rate, reset_rate):
+    def __init__(self, collator, model, resample_rate):
         
         self.collator = collator
         self.model = model
-        self.mode = mode
         self.resample_rate = resample_rate
-        self.reset_rate = reset_rate
 
         self.last_step_num = None
         
@@ -210,11 +208,14 @@ class DITTOTrainer(Trainer):
 
         bootstrap_count: int = 10,
         resample_rate: int = 10,
-        reset_rate: int = -1,
-        reset_adapter_rate: int = None,
-        mode: int = "full"
-        
+        generation_max_new_tokens: int = 1024,
+        generation_temperature: float = 1.0,
+        generation_batch_size: int = 1,
     ):
+        if bootstrap_count is None or bootstrap_count <= 0:
+            raise ValueError("bootstrap_count must be a positive integer.")
+        if resample_rate is None or resample_rate <= 0:
+            raise ValueError("resample_rate must be a positive integer.")
         if model_init_kwargs is None:
             model_init_kwargs = {}
         elif not isinstance(model, str):
@@ -363,7 +364,9 @@ class DITTOTrainer(Trainer):
                 model=model,
                 tokenizer=tokenizer,
                 bootstrap_count=bootstrap_count,
-                mode=mode,
+                generation_max_new_tokens=generation_max_new_tokens,
+                generation_temperature=generation_temperature,
+                generation_batch_size=generation_batch_size,
                 train_dataset=train_dataset,
                 max_length=max_length,
                 max_prompt_length=max_prompt_length,
@@ -420,7 +423,7 @@ class DITTOTrainer(Trainer):
         self.dataset_num_proc = dataset_num_proc   
 
         if callbacks == None: callbacks = []
-        callbacks.append(ResampleCallback(data_collator, model, mode, resample_rate, reset_rate))
+        callbacks.append(ResampleCallback(data_collator, model, resample_rate))
         
 
         super().__init__(
@@ -1101,4 +1104,3 @@ class DITTOTrainer(Trainer):
         kwargs = trl_sanitze_kwargs_for_tagging(model=self.model, tag_names=self._tag_names, kwargs=kwargs)
 
         return super().push_to_hub(commit_message=commit_message, blocking=blocking, **kwargs)
-

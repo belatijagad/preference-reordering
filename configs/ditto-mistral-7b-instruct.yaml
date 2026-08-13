@@ -2,15 +2,14 @@
 model_name_or_path: mistralai/Mistral-7B-Instruct-v0.2
 torch_dtype: bfloat16
 
-# some kinda dumb bug isn't letting me do this:
-# https://github.com/huggingface/transformers/issues/30019
-use_flash_attention_2: false
+use_flash_attention_2: true
 
 # Data training arguments
 preprocessing_num_workers: 1
 
 # DPOTrainer arguments
 bf16: true
+fp16: false
 do_eval: false
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
@@ -21,7 +20,9 @@ logging_steps: 1
 max_length: 2048
 max_prompt_length: 512
 
-per_device_train_batch_size: 4
+# Conservative single-GPU defaults; accumulation preserves a useful effective batch.
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
 push_to_hub: false
 seed: 42
 
@@ -48,9 +49,15 @@ ditto_max_steps: 40
 ditto_lr_scheduler_type: constant_with_warmup
 ditto_warmup_ratio: 0.25
 
-# effective batch size is approx 8 * 3, might be less in earlier iterations
-ditto_per_device_train_batch_size: 8
+# The collator expands each item by rescale_batch before DPO concatenates each pair.
+ditto_per_device_train_batch_size: 1
+ditto_gradient_accumulation_steps: 8
 rescale_batch: 3
+bootstrap_count: 10
+resample_rate: 10
+generation_max_new_tokens: 1024
+generation_temperature: 1.0
+generation_batch_size: 1
 
 remove_unused_columns: true
 beta: 0.05
@@ -58,4 +65,3 @@ beta: 0.05
 frac_expert: 0.7
 frac_replay: 0.2
 frac_noisy: 0.1
-

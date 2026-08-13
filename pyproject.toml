@@ -1,0 +1,86 @@
+[project]
+name = "preference-reordering"
+version = "0.1.0"
+description = "Code for Show, Don't Tell: Aligning Language Models with Demonstrated Feedback"
+readme = "README.md"
+requires-python = ">=3.10.9,<3.11"
+dependencies = [
+    "accelerate==0.30.1",
+    "alignment-handbook",
+    "datasets==2.19.1",
+    "deepspeed==0.17.2",
+    "einops==0.8.0",
+    "evaluate==0.4.0",
+    "flash-attn==2.8.3.post1",
+    "hf-transfer>=0.1.4",
+    "huggingface-hub==0.23.1",
+    "jinja2>=3.0.0",
+    "ninja>=1.11.1",
+    "numpy==1.24.2",
+    "packaging>=23.0",
+    "peft==0.9.0",
+    "protobuf<=3.20.2",
+    "safetensors>=0.3.3",
+    "scipy",
+    "sentencepiece>=0.1.99",
+    "tensorboard",
+    "torch==2.7.1",
+    "tqdm>=4.64.1",
+    "transformers==4.41.1",
+    "trl==0.8.6",
+]
+
+[dependency-groups]
+dev = [
+    "black==23.1.0",
+    "flake8>=6.0.0",
+    "hf-doc-builder>=0.4.0",
+    "isort>=5.12.0",
+    "parameterized>=0.9.0",
+    "pytest",
+]
+notebooks = [
+    "jupyterlab",
+    "nltk",
+    "pandas",
+    "scikit-learn",
+]
+
+[tool.uv]
+package = false
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+# The pinned Alignment Handbook metadata requires DeepSpeed 0.12.2. That
+# version predates the Blackwell-capable PyTorch stack, so use the compatible
+# direct dependency above without changing the pinned handbook source code.
+override-dependencies = ["deepspeed==0.17.2"]
+# Alignment Handbook lists bitsandbytes as an unconditional dependency, but
+# this project deliberately uses unquantized BF16 weights only.
+exclude-dependencies = ["bitsandbytes"]
+
+[tool.uv.sources]
+alignment-handbook = { git = "https://github.com/huggingface/alignment-handbook.git", rev = "606d2e954fd17999af40e6fb4f712055ca11b2f0" }
+torch = { index = "pytorch-cu128" }
+
+# DeepSpeed builds extensions against PyTorch. Keep its isolated build
+# environment on exactly the same PyTorch version as the runtime environment.
+[tool.uv.extra-build-dependencies]
+deepspeed = [{ requirement = "torch", match-runtime = true }]
+flash-attn = [
+    { requirement = "torch", match-runtime = true },
+    "ninja",
+    "packaging",
+    "psutil",
+]
+
+# Build a wheel for the exact PyTorch ABI and include kernels for both the A100
+# (sm_80) and RTX 5090 / RTX PRO 6000 Blackwell (sm_120). CUDA Toolkit 12.8+
+# and nvcc must be available on the Linux machine performing the sync.
+[tool.uv.extra-build-variables]
+flash-attn = { FLASH_ATTENTION_FORCE_BUILD = "TRUE", FLASH_ATTN_CUDA_ARCHS = "80;120", MAX_JOBS = "4" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

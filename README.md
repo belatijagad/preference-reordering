@@ -10,43 +10,47 @@ Language models are aligned to emulate the collective voice of many, resulting i
 
 ### *Instructions*
 
-We build on [alignment-handbook repo](https://github.com/huggingface/alignment-handbook). Here are the steps to get set up!
+We build on the [Alignment Handbook](https://github.com/huggingface/alignment-handbook). Its source revision and all Python dependencies are declared in `pyproject.toml` and managed with [uv](https://docs.astral.sh/uv/).
 
-First, create a Python virtual environment using e.g. Conda:
-```shell
-conda create -n ditto python=3.10 && conda activate ditto
-```
-
-Next, install PyTorch `v2.1.2`. We used the following.
+Install uv, then create the environment on the Linux training machine:
 
 ```shell
-conda install pytorch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 pytorch-cuda=12.1 -c pytorch -c nvidia
+uv sync --no-dev
 ```
 
-Then, install the alignment handbook dependencies.
+This creates `.venv`, installs Python 3.10, installs the pinned Alignment Handbook commit, resolves the CUDA 12.8 build of PyTorch, and builds FlashAttention 2 with A100 (`sm_80`) and RTX 5090 / RTX PRO 6000 Blackwell (`sm_120`) code. Commit the generated `uv.lock` after resolving it on the remote Linux machine. To include linting, documentation, and test tools, use `uv sync` without `--no-dev`. To work with the data-preparation notebooks, add `--group notebooks`.
+
+The remote host needs an R570-or-newer NVIDIA Linux driver and the full CUDA Toolkit 12.8 or newer, including `nvcc`. The PyTorch wheel bundles its CUDA runtime, but FlashAttention is deliberately compiled locally so that its extension matches PyTorch and contains `sm_120` kernels. A runtime-only CUDA installation is not sufficient. The build defaults to four parallel jobs to limit RAM usage; adjust `MAX_JOBS` in `pyproject.toml` if appropriate for the remote machine.
+
+Training, online sampling, and generation all use unquantized BF16 model weights with FlashAttention 2. Quantized 4-bit and 8-bit loading is intentionally rejected.
+
+PyTorch 2.7 added Blackwell support with CUDA 12.8, but FlashAttention 2's published support matrix still names Ampere, Ada, and Hopper. Building for `sm_120` solves the missing-kernel-image failure, but consumer Blackwell must still pass the exact BF16 forward/backward path used here. After syncing, run the repository smoke test on each remote GPU type before starting a full experiment:
 
 ```shell
-git clone https://github.com/huggingface/alignment-handbook.git
-cd ./alignment-handbook/
-git checkout 606d2e954fd17999af40e6fb4f712055ca11b2f0
-python -m pip install .
+uv run python scripts/verify_flash_attention.py
 ```
 
-Lastly, install the requirements for this repo to avoid errors due to updates in packages. 
+Run training and generation through uv:
 
-```shell 
-pip install -r requirements.txt
+```shell
+uv run accelerate launch \
+    --config_file configs/single_gpu.yaml \
+    scripts/run_ditto.py configs/ditto-mistral-7b-instruct.yaml
 ```
 
-A sample shell script with training + generation is in run.sh (trains Mistral Instruct v0.2 7B). Right now, it's set to finetune on email examples. The shell script has an argument for trying different datasets in the paper. Note that you may need to change the config files for your specific hardware or dataset.
+A sample shell script with training + generation is in `run.sh` (Mistral Instruct v0.2 7B). It defaults to the custom benchmark and author key 0. Select another processed benchmark or author with the `BENCHMARK` and `AUTHOR_KEY` environment variables. Note that you may need to change the config file for your specific hardware or dataset.
 
 ```shell 
 bash run.sh
+# or: BENCHMARK=ccat50 AUTHOR_KEY=3 bash run.sh
 ```
 
 ### Debugging
 
-* `AttributeError: 'DittoConfig' object has no attribute 'packing'`: revert to older version of trl (`trl==0.8.6`) in `requirements.txt`. 
+* `AttributeError: 'DittoConfig' object has no attribute 'packing'`: keep `trl==0.8.6` in `pyproject.toml`.
+* `... CUDA capability sm_120 is not compatible ...` or `no kernel image is available`: the RTX PRO 6000 and RTX 5090 are Blackwell (`sm_120`) GPUs. The original PyTorch 2.1.2/CUDA 12.1 environment predates Blackwell. This project now uses PyTorch 2.7.1 from the CUDA 12.8 index and builds FlashAttention with an explicit `sm_120` target. An `sm_120` build is necessary but not sufficient; require `scripts/verify_flash_attention.py` to pass on the target machine.
+* If FlashAttention reports that `CUDA_HOME` or `nvcc` is missing, install the full CUDA Toolkit 12.8+ on the remote host and make sure its `bin` directory is on `PATH`. The CUDA version displayed by `nvidia-smi` describes driver capability and does not prove that the compiler is installed.
+* If the remote machine must reproduce the original A100 software stack exactly, use the repository revision before this migration. The CUDA 12.8 stack remains compatible with A100 hardware, but upgrading PyTorch and DeepSpeed may change numerical or performance characteristics.
 
 
 ### *How do I cite this work?* 
@@ -65,4 +69,3 @@ Feel free to use the following BibTeX entry.
       primaryClass={cs.CL}
 }
 ```
-

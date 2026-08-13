@@ -16,7 +16,6 @@
 import logging
 import random
 import sys
-import pdb
 import pickle
 
 import torch
@@ -24,38 +23,27 @@ import transformers
 from transformers import AutoModelForCausalLM, set_seed
 
 from peft.utils import ModulesToSaveWrapper
-from peft.tuners.tuners_utils import BaseTuner, BaseTunerLayer
+from peft.tuners.tuners_utils import BaseTunerLayer
 
 from alignment import (
     DataArguments,
     DPOConfig,
     H4ArgumentParser,
     ModelArguments,
-    get_checkpoint,
-    get_datasets,
-    get_kbit_device_map,
-    get_peft_config,
-    get_quantization_config,
     get_tokenizer,
-    is_adapter_model,
 )
 
 from alignment.data import (
-    maybe_insert_system_message,
     is_openai_format
 )
 
-from peft import PeftConfig, PeftModel, get_peft_model, LoraConfig, TaskType
+from peft import get_peft_model, LoraConfig, TaskType
 from dataclasses import dataclass, field
 from datasets import Dataset, DatasetDict
 from typing import Optional, Literal
 
-from trl import DataCollatorForCompletionOnlyLM
 from scripts.sft_trainer import FixedSFTTrainer
 from scripts.ditto_trainer import DITTOTrainer
-
-import warnings
-import numpy as np
 
 from transformers.trainer_callback import TrainerCallback
 
@@ -75,14 +63,12 @@ class EarlyStoppingCallback(TrainerCallback):
                     last_loss = k["loss"]
                     break
                     
-            if last_loss < self.threshold:
+            if last_loss is not None and last_loss < self.threshold:
                 control.should_training_stop = True
 
 logger = logging.getLogger(__name__)
 
 MISTRAL_CHAT_TEMPLATE = "{{ bos_token }}{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'].strip() + '\n\n' %}{% else %}{% set loop_messages = messages %}{% set system_message = '' %}{% endif %}{% for message in loop_messages %}{% if loop.index0 == 0 %}{% set content = system_message + message['content'] %}{% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' '  + content.strip() + ' ' + eos_token }}{% endif %}{% endfor %}"
-
-from typing import Callable, Dict, List, Optional, Tuple, Union, Any
 
 @dataclass
 class DittoConfig(DPOConfig):
@@ -106,6 +92,9 @@ class DittoConfig(DPOConfig):
         default=None,
     )
     ditto_per_device_train_batch_size: Optional[int] = field(
+        default=1,
+    )
+    ditto_gradient_accumulation_steps: Optional[int] = field(
         default=8,
     )
 
@@ -129,8 +118,14 @@ class DittoConfig(DPOConfig):
     bootstrap_count: Optional[int] = field(
         default=10
     )
-    reset_rate: Optional[int] = field(
-        default=-1
+    generation_max_new_tokens: Optional[int] = field(
+        default=1024
+    )
+    generation_temperature: Optional[float] = field(
+        default=1.0
+    )
+    generation_batch_size: Optional[int] = field(
+        default=1
     )
     train_author_key: Optional[int] = field(
         default=0
@@ -142,7 +137,7 @@ class DittoConfig(DPOConfig):
         default=None
     )
 
-    sft_stop_loss: Optional[int] = field(
+    sft_stop_loss: Optional[float] = field(
         default=1.25,
     )
     
@@ -204,6 +199,25 @@ def copy_adapter_weights(src_adapter_name, tgt_adapter_name, model):
 def main():
     parser = H4ArgumentParser((ModelArguments, DataArguments, DittoConfig))
     model_args, data_args, training_args = parser.parse()
+    if model_args.load_in_4bit or model_args.load_in_8bit:
+        raise ValueError("Quantized model loading is not supported; all experiments use BF16 weights.")
+    if not model_args.use_peft:
+        raise ValueError("DITTO experiments require `use_peft: true` for the SFT and DITTO adapters.")
+    positive_integer_parameters = {
+        "per_device_train_batch_size": training_args.per_device_train_batch_size,
+        "gradient_accumulation_steps": training_args.gradient_accumulation_steps,
+        "ditto_per_device_train_batch_size": training_args.ditto_per_device_train_batch_size,
+        "ditto_gradient_accumulation_steps": training_args.ditto_gradient_accumulation_steps,
+        "bootstrap_count": training_args.bootstrap_count,
+        "resample_rate": training_args.resample_rate,
+        "generation_max_new_tokens": training_args.generation_max_new_tokens,
+        "generation_batch_size": training_args.generation_batch_size,
+    }
+    for parameter_name, value in positive_integer_parameters.items():
+        if value is None or value <= 0:
+            raise ValueError(f"{parameter_name} must be a positive integer.")
+    if training_args.generation_temperature is None or training_args.generation_temperature <= 0:
+        raise ValueError("generation_temperature must be greater than zero.")
 
     #######
     # Setup
@@ -223,11 +237,6 @@ def main():
     logger.info(f"Model parameters {model_args}")
     logger.info(f"Data parameters {data_args}")
     logger.info(f"Training/evaluation parameters {training_args}")
-
-    # Check for last checkpoint
-    last_checkpoint = get_checkpoint(training_args)
-    if last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-        logger.info(f"Checkpoint detected, resuming training at {last_checkpoint=}.")
 
     # Set seed for reproducibility
     set_seed(training_args.seed)
@@ -268,6 +277,8 @@ def main():
         raw_dict[dataset_key] = Dataset.from_dict(prefs)
     
     raw_datasets = DatasetDict(raw_dict)
+    if len(raw_datasets["train"]) == 0:
+        raise ValueError("The training dataset is empty.")
     column_names = list(raw_datasets["train"].features)
 
     #####################################
@@ -309,16 +320,24 @@ def main():
         raw_datasets[split] = raw_datasets[split].rename_columns(
             {"text_prompt": "prompt", "text_chosen": "chosen"}
         )
+        raw_datasets[split] = raw_datasets[split].add_column(
+            "example_id", list(range(len(raw_datasets[split])))
+        )
 
-    # Log a few random samples from the training set:
-    for index in random.sample(range(len(raw_datasets["train"])), 2):
+    # Log up to two random samples from the training set.
+    for index in random.sample(range(len(raw_datasets["train"])), min(2, len(raw_datasets["train"]))):
         logger.info(f"Prompt sample {index} of the raw training set:\n\n{raw_datasets['train'][index]['prompt']}")
         logger.info(f"Chosen sample {index} of the raw training set:\n\n{raw_datasets['train'][index]['chosen']}")
 
     torch_dtype = (
         model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype)
     )
-    quantization_config = get_quantization_config(model_args)
+    if torch_dtype is not torch.bfloat16:
+        raise ValueError("DITTO experiments require `torch_dtype: bfloat16`.")
+    if not training_args.bf16 or training_args.fp16:
+        raise ValueError("DITTO experiments require `bf16: true` and `fp16: false`.")
+    if not model_args.use_flash_attention_2:
+        raise ValueError("DITTO experiments require `use_flash_attention_2: true`.")
     
     model_kwargs = dict(
         revision=model_args.base_model_revision,
@@ -376,6 +395,7 @@ def main():
     training_args.lr_scheduler_type = training_args.ditto_lr_scheduler_type
     training_args.warmup_ratio = training_args.ditto_warmup_ratio
     training_args.per_device_train_batch_size = training_args.ditto_per_device_train_batch_size
+    training_args.gradient_accumulation_steps = training_args.ditto_gradient_accumulation_steps
 
     model.add_adapter("ditto", lora_config)
     model.set_adapter("ditto")
@@ -393,6 +413,11 @@ def main():
         max_length=training_args.max_length,
         max_prompt_length=training_args.max_prompt_length,
         loss_type=training_args.loss_type,  
+        bootstrap_count=training_args.bootstrap_count,
+        resample_rate=training_args.resample_rate,
+        generation_max_new_tokens=training_args.generation_max_new_tokens,
+        generation_temperature=training_args.generation_temperature,
+        generation_batch_size=training_args.generation_batch_size,
     )
 
     ###############

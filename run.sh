@@ -1,20 +1,24 @@
-conda activate ditto
+#!/usr/bin/env bash
+set -euo pipefail
 
-export HF_TOKEN=""
+benchmark="${BENCHMARK:-custom}"
+author_key="${AUTHOR_KEY:-0}"
+output_dir="${OUTPUT_DIR:-outputs/${benchmark}-mistral-7b-instruct-ditto}"
 
-benchmark="custom"
+if [[ -e "${output_dir}" ]]; then
+    echo "Refusing to overwrite existing output directory: ${output_dir}" >&2
+    echo "Set OUTPUT_DIR to a new path or move the existing directory." >&2
+    exit 1
+fi
 
-rm -rf outputs/${benchmark}-mistral-7b-instruct-ditto
-
-ACCELERATE_LOG_LEVEL=info accelerate launch \
-    --config_file configs/multi_gpu.yaml \
+ACCELERATE_LOG_LEVEL=info uv run accelerate launch \
+    --config_file configs/single_gpu.yaml \
     scripts/run_ditto.py configs/ditto-mistral-7b-instruct.yaml \
-    --train_pkl=benchmarks/${benchmark}/processed/custom_train.pkl \
-    --train_author_key=0 \
-    --output_dir=outputs/${benchmark}-mistral-7b-instruct-ditto \
-    --train_pkl=benchmarks/${benchmark}/processed/${benchmark}_train.pkl
+    --train_pkl="benchmarks/${benchmark}/processed/${benchmark}_train.pkl" \
+    --train_author_key="${author_key}" \
+    --output_dir="${output_dir}"
 
-python generate.py \
-    --benchmark=$benchmark \
-    --train_author_key=0
-
+uv run python generate.py \
+    --benchmark="${benchmark}" \
+    --train_author_key="${author_key}" \
+    --adapter-path="${output_dir}/ditto"
