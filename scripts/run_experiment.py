@@ -12,7 +12,6 @@ import yaml
 
 from scripts.artifacts import ArtifactLayout, experiment_bundle_sha256
 
-
 METHODS = {"zero_shot", "few_shot", "sft", "ditto"}
 SPLITS = {"validation", "test"}
 
@@ -64,9 +63,7 @@ def main() -> None:
     config = load_config(experiment_path)
     configured_model_path = Path(str(require(config, "model_config")))
     model_path = (
-        configured_model_path
-        if configured_model_path.is_absolute()
-        else experiment_path.parent / configured_model_path
+        configured_model_path if configured_model_path.is_absolute() else experiment_path.parent / configured_model_path
     ).resolve()
     model_config = load_config(model_path)
     source_config_sha256 = experiment_bundle_sha256(experiment_path, model_path)
@@ -101,7 +98,8 @@ def main() -> None:
             "accelerate.commands.launch",
             "--config_file",
             "configs/single_gpu.yaml",
-            "scripts/run_ditto.py",
+            "--module",
+            "scripts.run_ditto",
             str(model_path),
             f"--artifact_root={config.get('artifact_root', 'outputs')}",
             f"--dataset_root={config.get('dataset_root', 'benchmarks')}",

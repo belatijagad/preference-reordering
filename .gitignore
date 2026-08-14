@@ -163,6 +163,7 @@ cython_debug/
 data/
 wandb/
 outputs/
+runs/
 
 
 run_all.sh
