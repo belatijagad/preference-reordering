@@ -34,6 +34,17 @@ cp configs/experiment.yaml configs/my-experiment.yaml
 bash run.sh configs/my-experiment.yaml
 ```
 
+For the three-prompt CMCC manual-inspection run:
+
+```sh
+bash run.sh configs/experiment-cmcc-3x3.yaml
+```
+
+That experiment finds a shared train prompt and a shared test prompt directly
+from the CMCC data for authors 0, 3, and 5. The exact three-author,
+one-prompt-per-author selection is also used for training and few-shot
+generation; the selected prompts are recorded in `run.json`.
+
 `run.sh` saves the shared configuration and tokenizer once under
 `outputs/<experiment>/<model>/`. Each benchmark author gets separate SFT and
 DITTO adapters, metrics, checkpoints, and resumable JSONL generations under:

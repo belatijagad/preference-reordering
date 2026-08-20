@@ -1,0 +1,16 @@
+experiment_name: cmcc-email-2x3
+model_config: ditto-mistral-7b-instruct.yaml
+benchmark: cmcc
+train_author_key: 9
+train_pkl: benchmarks/cmcc/processed/cmcc_email_2x3_train_7_clean.pkl
+test_pkl: benchmarks/cmcc/processed/cmcc_email_2x3_test.pkl
+train_instances: 7
+
+artifact_root: outputs
+dataset_root: benchmarks
+
+generation_methods: [zero_shot, few_shot, sft, ditto]
+generation_splits: [test]
+generation_num_return_sequences: 1
+generation_instances_per_author: 3
+few_shot_instances_per_author: 7

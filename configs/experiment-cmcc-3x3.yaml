@@ -1,0 +1,13 @@
+experiment_name: cmcc-3x3
+model_config: ditto-mistral-7b-instruct.yaml
+benchmark: cmcc
+train_author_key: 0
+train_author_keys: [0, 3, 5]
+selection_instances_per_author: 1
+
+artifact_root: outputs
+dataset_root: benchmarks
+
+generation_methods: [zero_shot, few_shot, sft, ditto]
+generation_splits: [test]
+generation_num_return_sequences: 3

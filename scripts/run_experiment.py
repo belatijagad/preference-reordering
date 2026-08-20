@@ -72,13 +72,29 @@ def main() -> None:
         str(require(config, "experiment_name")),
         str(require(model_config, "model_name_or_path")),
         str(require(config, "benchmark")),
-        int(require(config, "train_author_key")),
+        int((config.get("train_author_keys") or [require(config, "train_author_key")])[0]),
     )
     methods = validate_choices(config.get("generation_methods"), METHODS, "generation_methods")
     splits = validate_choices(config.get("generation_splits"), SPLITS, "generation_splits")
     num_return_sequences = int(config.get("generation_num_return_sequences", 3))
+    generation_instances_per_author = int(
+        config.get(
+            "generation_instances_per_author",
+            config.get("selection_instances_per_author", config.get("train_instances", 1)),
+        )
+    )
+    few_shot_instances_per_author = int(
+        config.get(
+            "few_shot_instances_per_author",
+            config.get("selection_instances_per_author", config.get("train_instances", 1)),
+        )
+    )
     if num_return_sequences <= 0:
         raise ValueError("generation_num_return_sequences must be greater than zero.")
+    if generation_instances_per_author <= 0:
+        raise ValueError("generation_instances_per_author must be greater than zero.")
+    if few_shot_instances_per_author <= 0:
+        raise ValueError("few_shot_instances_per_author must be greater than zero.")
 
     if layout.author_dir.exists() and not completed_run(layout.run_file):
         raise FileExistsError(f"Refusing to overwrite incomplete author run: {layout.author_dir}")
@@ -105,10 +121,23 @@ def main() -> None:
             f"--dataset_root={config.get('dataset_root', 'benchmarks')}",
             f"--experiment_name={require(config, 'experiment_name')}",
             f"--benchmark={require(config, 'benchmark')}",
-            f"--train_author_key={int(require(config, 'train_author_key'))}",
+            f"--train_author_key={int((config.get('train_author_keys') or [require(config, 'train_author_key')])[0])}",
             f"--source_config_sha256={source_config_sha256}",
         ]
-        for optional_field in ("train_instances", "train_pkl", "validation_pkl", "test_pkl"):
+        author_keys = config.get("train_author_keys")
+        if author_keys is not None:
+            if not isinstance(author_keys, list) or not author_keys:
+                raise ValueError("train_author_keys must be a non-empty YAML list.")
+            if len(author_keys) != len(set(author_keys)):
+                raise ValueError("train_author_keys must not contain duplicates.")
+            training_command.append(f"--train_author_keys={','.join(str(int(key)) for key in author_keys)}")
+        for optional_field in (
+            "train_instances",
+            "selection_instances_per_author",
+            "train_pkl",
+            "validation_pkl",
+            "test_pkl",
+        ):
             if config.get(optional_field) is not None:
                 training_command.append(f"--{optional_field}={config[optional_field]}")
         run(training_command)
@@ -127,6 +156,10 @@ def main() -> None:
                     split,
                     "--num-return-sequences",
                     str(num_return_sequences),
+                    "--instances-per-author",
+                    str(generation_instances_per_author),
+                    "--few-shot-instances-per-author",
+                    str(few_shot_instances_per_author),
                 ]
             )
 

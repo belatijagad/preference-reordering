@@ -129,7 +129,9 @@ class DittoConfig(DPOTrainingArguments):
     generation_temperature: float | None = field(default=1.0)
     generation_batch_size: int | None = field(default=1)
     train_author_key: int | None = field(default=0)
+    train_author_keys: str | None = field(default=None)
     train_instances: int | None = field(default=None)
+    selection_instances_per_author: int | None = field(default=None)
     train_pkl: str | None = field(default=None)
     validation_pkl: str | None = field(default=None)
     test_pkl: str | None = field(default=None)
@@ -266,7 +268,9 @@ def initialize_artifacts(model_args, data_args, training_args) -> tuple[Artifact
         "source_config_sha256",
         "test_pkl",
         "train_author_key",
+        "train_author_keys",
         "train_instances",
+        "selection_instances_per_author",
         "train_pkl",
         "validation_pkl",
     }
@@ -338,6 +342,9 @@ def initialize_artifacts(model_args, data_args, training_args) -> tuple[Artifact
         "source_config_sha256": training_args.source_config_sha256,
         "status": "running",
         "author_key": int(training_args.train_author_key),
+        "selected_author_keys": selected_author_keys(training_args),
+        "selected_instances_per_author": selected_instances_per_author(training_args),
+        "selected_prompts": {},
         "started_at": utc_now(),
         "completed_at": None,
         "artifacts": {
@@ -350,6 +357,57 @@ def initialize_artifacts(model_args, data_args, training_args) -> tuple[Artifact
     }
     write_json(layout.run_file, run_metadata)
     return layout, run_metadata
+
+
+def selected_author_keys(training_args) -> list[int]:
+    """Return the configured author IDs, preserving their YAML order."""
+
+    if not training_args.train_author_keys:
+        return [int(training_args.train_author_key)]
+    try:
+        keys = [int(value.strip()) for value in str(training_args.train_author_keys).split(",") if value.strip()]
+    except ValueError as error:
+        raise ValueError("train_author_keys must be a comma-separated list of integers.") from error
+    if not keys or len(keys) != len(set(keys)):
+        raise ValueError("train_author_keys must contain distinct author IDs.")
+    return keys
+
+
+def selected_instances_per_author(training_args) -> int:
+    value = training_args.selection_instances_per_author or training_args.train_instances or 1
+    if value <= 0:
+        raise ValueError("selection_instances_per_author must be positive.")
+    return int(value)
+
+
+def select_examples(
+    data,
+    author_keys: list[int],
+    instances_per_author: int,
+    prompt: str | None = None,
+) -> list[dict]:
+    if prompt is None and len(author_keys) > 1:
+        shared_prompts = set.intersection(
+            *[{example.get("prompt") for example in data[author_key]} for author_key in author_keys]
+        )
+        if not shared_prompts:
+            raise ValueError(f"The selected authors have no shared prompt: {author_keys}")
+        prompt = sorted(shared_prompts)[0]
+    selected = []
+    for author_key in author_keys:
+        if author_key not in data:
+            raise KeyError(f"Author {author_key} is not present in the dataset.")
+        examples = data[author_key]
+        if prompt is not None:
+            examples = [example for example in examples if example.get("prompt") == prompt]
+        if len(examples) < instances_per_author:
+            raise ValueError(
+                f"Author {author_key} has only {len(examples)} examples; "
+                f"cannot select {instances_per_author}"
+                + (" for the requested prompt." if prompt is not None else ".")
+            )
+        selected.extend(examples[:instances_per_author])
+    return selected
 
 
 def mark_incomplete_run_failed(layout: ArtifactLayout) -> None:
@@ -431,6 +489,8 @@ def main():
     # Load datasets
     ###############
     raw_dict = {}
+    author_keys = selected_author_keys(training_args)
+    instances_per_author = selected_instances_per_author(training_args)
     for dataset_key, path in [("train", training_args.train_pkl)]:
         prefs = {
             "prompt": [],
@@ -440,13 +500,16 @@ def main():
         with open(path, "rb") as pickle_file:
             data = pickle.load(pickle_file)
 
-        spec_dataset = data[int(training_args.train_author_key)]
-
-        if training_args.train_instances:
-            spec_dataset = spec_dataset[: int(training_args.train_instances)]
+        spec_dataset = select_examples(data, author_keys, instances_per_author)
+        run_metadata["selected_prompts"]["train"] = spec_dataset[0]["prompt"]
+        write_json(layout.run_file, run_metadata)
 
         run_metadata["training_examples"] = len(spec_dataset)
-        run_metadata["training_indices"] = list(range(len(spec_dataset)))
+        run_metadata["training_indices"] = [
+            {"author_key": key, "index": index}
+            for key in author_keys
+            for index in range(instances_per_author)
+        ]
         write_json(layout.run_file, run_metadata)
 
         for item in spec_dataset:

@@ -10,7 +10,7 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, set_seed
 
 from scripts.arguments import configure_chat_template, load_env_file
-from scripts.artifacts import SCHEMA_VERSION, ArtifactLayout, model_slug, read_json, sha256_file
+from scripts.artifacts import SCHEMA_VERSION, ArtifactLayout, model_slug, read_json, sha256_file, write_json
 
 METHODS = ("zero_shot", "few_shot", "sft", "ditto")
 SPLITS = ("validation", "test")
@@ -22,6 +22,27 @@ def load_pickle_split(path: Path, author_key: int) -> list[dict[str, Any]]:
     examples = data[author_key]
     if not isinstance(examples, list):
         raise ValueError(f"Expected author {author_key} in {path} to contain a list of examples.")
+    return examples
+
+
+def select_examples(path: Path, run: dict[str, Any], instances_per_author: int) -> list[dict[str, Any]]:
+    with path.open("rb") as pickle_file:
+        data = pickle.load(pickle_file)
+    author_keys = [int(key) for key in run.get("selected_author_keys", [run["author_key"]])]
+    examples = []
+    for author_key in author_keys:
+        if author_key not in data:
+            raise KeyError(f"Author {author_key} is not present in {path}.")
+        author_examples = data[author_key]
+        if len(author_examples) < instances_per_author:
+            raise ValueError(
+                f"Author {author_key} has fewer than {instances_per_author} examples in {path}."
+            )
+        for index, example in enumerate(author_examples[:instances_per_author]):
+            selected = dict(example)
+            selected["author_key"] = author_key
+            selected["source_index"] = index
+            examples.append(selected)
     return examples
 
 
@@ -92,6 +113,8 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int)
     parser.add_argument("--temperature", type=float)
     parser.add_argument("--num-return-sequences", type=int, default=3)
+    parser.add_argument("--instances-per-author", type=int, required=True)
+    parser.add_argument("--few-shot-instances-per-author", type=int, required=True)
     args = parser.parse_args()
 
     if args.max_new_tokens is not None and args.max_new_tokens <= 0:
@@ -100,6 +123,10 @@ def main() -> None:
         parser.error("--temperature must be greater than zero")
     if args.num_return_sequences <= 0:
         parser.error("--num-return-sequences must be greater than zero")
+    if args.instances_per_author <= 0:
+        parser.error("--instances-per-author must be greater than zero")
+    if args.few_shot_instances_per_author <= 0:
+        parser.error("--few-shot-instances-per-author must be greater than zero")
 
     layout = ArtifactLayout.from_author_dir(args.author_dir)
     experiment = read_json(layout.experiment_file)
@@ -139,7 +166,10 @@ def main() -> None:
     split_path = Path(split_metadata["path"])
     if sha256_file(split_path) != split_metadata["sha256"]:
         raise ValueError(f"The recorded {args.split} dataset has changed: {split_path}")
-    examples = load_pickle_split(split_path, author_key)
+    examples = select_examples(split_path, run, args.instances_per_author)
+    if isinstance(run.get("selected_prompts"), dict) and not run["selected_prompts"].get(args.split):
+        run["selected_prompts"][args.split] = examples[0]["prompt"]
+        write_json(layout.run_file, run)
 
     demonstrations = None
     if args.method == "few_shot":
@@ -149,9 +179,11 @@ def main() -> None:
         train_path = Path(train_metadata["path"])
         if sha256_file(train_path) != train_metadata["sha256"]:
             raise ValueError(f"The recorded training dataset has changed: {train_path}")
-        demonstrations = load_pickle_split(train_path, author_key)
-        training_examples = int(run["training_examples"])
-        demonstrations = demonstrations[:training_examples]
+        demonstrations = select_examples(
+            train_path,
+            run,
+            args.few_shot_instances_per_author,
+        )
 
     run_id = str(run["run_id"])
     output_path = layout.generations_file(args.split, args.method)
@@ -198,6 +230,7 @@ def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(layout.tokenizer_dir)
     configure_chat_template(tokenizer)
+    tokenizer.model_max_length = int(base_model.config.max_position_embeddings)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     generator = pipeline("text-generation", model=base_model, device="cuda", tokenizer=tokenizer)
@@ -240,8 +273,11 @@ def main() -> None:
                     "method": args.method,
                     "benchmark": dataset["benchmark"],
                     "split": args.split,
-                    "author_key": author_key,
-                    "prompt_id": f"{dataset['benchmark']}:{args.split}:{author_key}:{prompt_index:04d}",
+                    "author_key": int(example.get("author_key", author_key)),
+                    "prompt_id": (
+                        f"{dataset['benchmark']}:{args.split}:"
+                        f"{int(example.get('author_key', author_key))}:{int(example.get('source_index', prompt_index)):04d}"
+                    ),
                     "prompt_index": prompt_index,
                     "prompt": prompt,
                     "reference": reference,

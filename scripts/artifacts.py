@@ -15,9 +15,10 @@ from typing import Any
 
 import yaml
 
-
 SCHEMA_VERSION = 1
 OPERATIONAL_CONFIG_FIELDS = {
+    "few_shot_instances_per_author",
+    "generation_instances_per_author",
     "generation_methods",
     "generation_num_return_sequences",
     "generation_splits",
